@@ -90,7 +90,9 @@ struct ContentView: View {
                     mapView.addPlace(newMapItem)
                 }
                 .onAppear {
-                    dataFetcher.download()
+                    Task {
+                        await dataFetcher.download()
+                    }
                 }
             
             

@@ -24,6 +24,7 @@ struct WaterDispenser: Identifiable {
 }
 
 
+@MainActor
 class DataFetcher: ObservableObject {
     
     @Published var dataArray : [WaterDispenser]?
@@ -41,7 +42,7 @@ class DataFetcher: ObservableObject {
     
     // MARK: - Functions
     
-    func download() {
+    func download() async {
         print(">> 正在下載資料集...")
         dataArray = nil
         
@@ -49,7 +50,7 @@ class DataFetcher: ObservableObject {
         tapWaterResults = Array<Dictionary<String,Any>>()
         fetchOffset = 0
         
-        downloadInfoJson()
+        await downloadInfoJson()
     }
     
     func loadData(_ value: Int) {
@@ -82,59 +83,50 @@ class DataFetcher: ObservableObject {
     
     // MARK: - Download Data
     
-    private func downloadInfoJson() {
-        httpGET_withFetchJsonObject(URLString: infoUrlString) { json in
-            if let json = json,
-               let wdUrlStr = json["WaterDispenser"] as? String,
-               let twUrlStr = json["TapWater"] as? String
-            {
-                self.dispenserUrlString = wdUrlStr
-                self.tapWaterUrlString = twUrlStr
-            }
-            self.downloadDispenserData()
+    private func downloadInfoJson() async {
+        if let json = try? await httpGET_withFetchJsonObject(URLString: infoUrlString),
+           let wdUrlStr = json["WaterDispenser"] as? String,
+           let twUrlStr = json["TapWater"] as? String
+        {
+            dispenserUrlString = wdUrlStr
+            tapWaterUrlString = twUrlStr
+            await downloadDispenserData()
         }
     }
     
-    
-    private func downloadDispenserData() {
-        fetchDispenser(limit: fetchLimit, offset: fetchOffset) { json in
-            var resultsCount = 0
-            if let json = json,
-               let result = json["result"] as? Dictionary<String,Any>,
-               let results = result["results"] as? Array<Dictionary<String,Any>>
-            {
-                self.dispenserResults?.append(contentsOf: results)
-                resultsCount = results.count
-            }
+    private func downloadDispenserData() async {
+        var resultsCount = 0
+        if let json = try? await fetchDispenser(limit: fetchLimit, offset: fetchOffset),
+           let result = json["result"] as? Dictionary<String,Any>,
+           let results = result["results"] as? Array<Dictionary<String,Any>>
+        {
+            dispenserResults?.append(contentsOf: results)
+            resultsCount = results.count
             
-            if resultsCount >= self.fetchLimit {
-                self.fetchOffset += self.fetchLimit
-                self.downloadDispenserData()
+            if resultsCount >= fetchLimit {
+                fetchOffset += fetchLimit
+                await downloadDispenserData()
             } else {
-                self.fetchOffset = 0
-                self.downloadTapWaterData()
+                fetchOffset = 0
+                await downloadTapWaterData()
             }
         }
     }
     
-    private func downloadTapWaterData() {
-        fetchTapWater(limit: fetchLimit, offset: fetchOffset) { json in
-            var resultsCount = 0
-            if let json = json,
-               let result = json["result"] as? Dictionary<String,Any>,
-               let results = result["results"] as? Array<Dictionary<String,Any>>
-            {
-                self.tapWaterResults?.append(contentsOf: results)
-                resultsCount = results.count
-            }
+    private func downloadTapWaterData() async {
+        var resultsCount = 0
+        if let json = try? await fetchTapWater(limit: fetchLimit, offset: fetchOffset),
+           let result = json["result"] as? Dictionary<String,Any>,
+           let results = result["results"] as? Array<Dictionary<String,Any>>
+        {
+            tapWaterResults?.append(contentsOf: results)
+            resultsCount = results.count
             
-            if resultsCount >= self.fetchLimit {
-                self.fetchOffset += self.fetchLimit
-                self.downloadTapWaterData()
+            if resultsCount >= fetchLimit {
+                fetchOffset += fetchLimit
+                await downloadTapWaterData()
             } else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.convertResultsToDataArray()
-                }
+                convertResultsToDataArray()
             }
         }
     }
@@ -196,19 +188,22 @@ class DataFetcher: ObservableObject {
     
     // MARK: - Fetch Data
     
-    private func fetchDispenser(limit: Int, offset: Int, callback: @escaping (Dictionary<String,Any>?) -> Void) {
-        httpGET_withFetchJsonObject(URLString: "\(dispenserUrlString)&limit=\(limit)&offset=\(offset)", callback: callback)
+    private func fetchDispenser(limit: Int, offset: Int) async throws -> [String: Any]? {
+        let json = try await httpGET_withFetchJsonObject(URLString: "\(dispenserUrlString)&limit=\(limit)&offset=\(offset)")
+        return json
     }
     
-    private func fetchTapWater(limit: Int, offset: Int, callback: @escaping (Dictionary<String,Any>?) -> Void) {
-        httpGET_withFetchJsonObject(URLString: "\(tapWaterUrlString)&limit=\(limit)&offset=\(offset)", callback: callback)
+    private func fetchTapWater(limit: Int, offset: Int) async throws -> [String: Any]? {
+        let json = try await httpGET_withFetchJsonObject(URLString: "\(tapWaterUrlString)&limit=\(limit)&offset=\(offset)")
+        return json
     }
     
     
     // MARK: - HTTP GET
     
-    private func httpGET_withFetchJsonObject(URLString: String, callback: @escaping (Dictionary<String,Any>?) -> Void) {
-        httpRequestWithFetchJsonObject(httpMethod: "GET", URLString: URLString, parameters: nil, callback: callback)
+    private func httpGET_withFetchJsonObject(URLString: String) async throws -> [String: Any]? {
+        let json = try await httpRequestWithFetchJsonObject(httpMethod: "GET", URLString: URLString, parameters: nil)
+        return json
     }
     
     
@@ -216,8 +211,7 @@ class DataFetcher: ObservableObject {
     
     private func httpRequestWithFetchJsonObject(httpMethod: String,
                                                 URLString: String,
-                                                parameters: Dictionary<String,Any>?,
-                                                callback: @escaping (Dictionary<String,Any>?) -> Void)
+                                                parameters: Dictionary<String,Any>?) async throws -> [String: Any]?
     {
         // Create request
         let url = URL(string: URLString)!
@@ -236,23 +230,11 @@ class DataFetcher: ObservableObject {
             request.httpBody = jsonData
         }
         
-        // Task
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            DispatchQueue.main.async {
-                guard let data = data, error == nil else {
-                    print(error?.localizedDescription ?? "No data")
-                    callback(nil)
-                    return
-                }
-                
-                let responseJSON = try? JSONSerialization.jsonObject(with: data, options: [])
-                if let responseJSON = responseJSON as? [String: Any] {
-                    callback(responseJSON)
-                } else {
-                    callback(nil)
-                }
-            }
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let json = try? JSONSerialization.jsonObject(with: data, options: [])
+        if let json = json as? [String: Any] {
+            return json
         }
-        task.resume()
+        return nil
     }
 }
